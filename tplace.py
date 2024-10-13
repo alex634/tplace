@@ -1,98 +1,82 @@
+import os
 import socket
-import configparser
-import hashlib
-from PIL import Image
 import struct
-import sqlite3
-
-class ReusedNonceDetector:
-    def __init__(self, cpsr):
-        self._connection = sqlite3.connect(cpsr["database"]["filename"])
-        self._cursor = self._connection.cursor()
-
-    def reused(self, nonce):
-        rows = self._cursor.execute('SELECT * FROM used_nonces WHERE nonce_hex="' + str(nonce) + '";')
-        if len(rows) == 0:
-            return False
-        return True
-
-    def append_To_Used_List(nonce):
-        self._cursor.execute('INSERT INTO used_nonces (nonce_hex) VALUES ("' + nonce + '");')
-
-    def __del__(self):
-        self._connection.close()
-
+from PIL import Image
+import configparser
+import argparse
 
 class Packet:
-    def __unpack_Packet_Data(self):
-        unpacked_Data = struct.unpack("!HHBBB", self._bytes)
-        self._x, self._y, self._r, self._g, self._b = unpacked_Data
+	def __unpack(self):
+		self._x, self._y, self._r, self._g, self._b  = struct.unpack("!HHBBB", self._data)
+		print(self._data)
+	
+	def __init__(self, data):
+		self._data = data
+		self.__unpack()
+	
+	def get_Position(self):
+		return (self._x % 1024, self._y % 1024)
 
-    def __get_packet(self):
-        while self._bytes < 18:
-            self._bytes = self._c.recv(18)
-    
-    def __init__(self, c, cpsr, rnd):
-        self._c = c
-        self._cpsr = cpsr
-        self._bytes = bytes()
-        self.__get_Packet()
-        self.__unpack_Packet_Data()
-        self.__rnd = rnd
-
-    def get_Color_Tuplet(self):
-        return (self._r, self._g, self._b)
-    
-    def get_Position_Tuplet(self):
-        return (self._x, self._y)
-    
-    def __get_Leading_Zero_Count(self, hex_Digest):
-        count = 0
-        
-        while hex_Digest[count] == "0":
-            count += 1
-
-        return count
-    
-    def check_Nonce_Hash(self):
-        leading_Zeros = self._cpsr['nonce']['LeadingZeros']
-        hash = hashlib.new('md5sum')
-        hash.update(self._bytes)
-
-        hex_Digest = hash.hexdigest()
-        
-        if self.__get_Leading_Zero_Count(hex_Digest) >= leading_Zeros and not self._rnd.reused(hex_Digest):
-            self._rnd.append_To_Used_List(hex_Digest)
-            return True
-
-        return False
-
-def open_Image_And_Plot(coord, color, cpsr):
-    im = Image.open(cpsr['image']["filename"])
-    im.putpixel(coord, color)
-    im.save(cpsr['image']["filename"])
-
-def read_Config():
-    cpsr = configparser.ConfigParser()
-    cpsr.read("tplace.ini")
-    return cpsr
+	def get_Pixel_Color(self):
+		return (self._r, self._g, self._b)
 
 def create_Socket(cpsr):
-    s = socket.socket()
-    s.bind((cpsr['server']['BindIp'],int(cpsr['server']['BindPort'])))
-    s.listen(1)
-    return s
+	s = socket.socket()
+	s.bind((cpsr["server"]["ip"], int(cpsr["server"]["port"])))
+	s.listen(1)
+	return s
+
+def receive_Seven(c):
+	data = bytes()
+	print("Waiting on bytes...")
+	while len(data) < 7:
+		data = c.recv(7)
+	return data
+	print("Received Data +")
+
+def modify_Image(p, cpsr):
+	im = Image.open(cpsr["canvas"]["filename"])
+	print("Plotting pixel at (x,y): " + str(p.get_Position()))
+	print("Color of pixel (r,g,b): " + str(p.get_Pixel_Color()))
+	im.putpixel(p.get_Position(), p.get_Pixel_Color())
+	im.save(cpsr["canvas"]["filename"])
+	im.close()
+
+def handler_Loop(s, cpsr):
+	while True:
+		c,a = s.accept()
+		c.settimeout(5)
+		print("Received connection from: " + str(a))
+		try:
+			data = receive_Seven(c)
+			p = Packet(data)
+			modify_Image(p, cpsr)
+		except:
+			print("Timeout reached on connection")
+		c.close()
+		
+def create_Canvas(cpsr):
+    blank_Image = Image.new("RGB", (1024,1024), (255,255,255))
+    blank_Image.save(cpsr["canvas"]["filename"])
+    blank_Image.close()
+    
+
+def add_Arguments(psr):
+    psr.add_argument("--config", default="tplace.ini", help="The configuration file location for this program")
+    psr.add_argument("--clear", default=False, action="store_true", help="Clear the canvas pointed to by the ini file or create it if it doesn't exist")
 
 def main():
-    cpsr = read_Config()
+    psr = argparse.ArgumentParser()
+    add_Arguments(psr)
+    args = psr.parse_args()
+    
+    cpsr = configparser.ConfigParser()
+    cpsr.read(args.config)
+	    
+    if args.clear or not os.path.isfile(cpsr["canvas"]["filename"]):
+        create_Canvas(cpsr)
+	
     s = create_Socket(cpsr)
-    rnd = ReusedNonceDetector(cpsr)
-    while True:
-        c,a = s.accept()
-        print("Connection accepted from: " + str(a))
-        p = Packet(c, cpsr, rnd)
-        if p.check_Nonce_Hash():
-           open_Image_And_Plot(p.get_Position_Tuplet(), p.get_Color_Tuplet())
-        c.close()
+    handler_Loop(s, cpsr)
 
 main()
